@@ -1,16 +1,19 @@
 package parsemail
 
 import (
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"strings"
 	"time"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 const contentTypeMultipartMixed = "multipart/mixed"
@@ -45,13 +48,33 @@ func Parse(r io.Reader) (email Email, err error) {
 	case contentTypeMultipartRelated:
 		email.TextBody, email.HTMLBody, email.EmbeddedFiles, err = parseMultipartRelated(msg.Body, params["boundary"])
 	case contentTypeTextPlain:
-		message, _ := ioutil.ReadAll(msg.Body)
+		charset := params["charset"]
+		decodedContent, err := decodeContentWithCharset(msg.Body, msg.Header.Get("Content-Transfer-Encoding"), charset)
+		if err != nil {
+			return email, err
+		}
+
+		message, err := io.ReadAll(decodedContent)
+		if err != nil {
+			return email, err
+		}
+
 		email.TextBody = strings.TrimSuffix(string(message[:]), "\n")
 	case contentTypeTextHtml:
-		message, _ := ioutil.ReadAll(msg.Body)
+		charset := params["charset"]
+		decodedContent, err := decodeContentWithCharset(msg.Body, msg.Header.Get("Content-Transfer-Encoding"), charset)
+		if err != nil {
+			return email, err
+		}
+
+		message, err := io.ReadAll(decodedContent)
+		if err != nil {
+			return email, err
+		}
+
 		email.HTMLBody = strings.TrimSuffix(string(message[:]), "\n")
 	default:
-		email.Content, err = decodeContent(msg.Body, msg.Header.Get("Content-Transfer-Encoding"))
+		email.Content, err = decodeContentByTransferEncoding(msg.Body, msg.Header.Get("Content-Transfer-Encoding"))
 	}
 
 	return
@@ -121,14 +144,26 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
 			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
 		case contentTypeTextHtml:
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
@@ -178,14 +213,26 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
 			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
 		case contentTypeTextHtml:
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
@@ -217,6 +264,16 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 	return textBody, htmlBody, embeddedFiles, err
 }
 
+func decodeContentByTransferEncoding(content io.Reader, transferEncoding string) (decodedContent io.Reader, err error) {
+	if transferEncoding == "base64" {
+		return base64.NewDecoder(base64.StdEncoding, content), nil
+	}
+	if transferEncoding == "quoted-printable" {
+		return quotedprintable.NewReader(content), nil
+	}
+	return content, nil
+}
+
 func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody string, attachments []Attachment, embeddedFiles []EmbeddedFile, err error) {
 	mr := multipart.NewReader(msg, boundary)
 	for {
@@ -243,14 +300,26 @@ func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody str
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 		} else if contentType == contentTypeTextPlain {
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, attachments, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
 			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
 		} else if contentType == contentTypeTextHtml {
-			ppContent, err := ioutil.ReadAll(part)
+			charset := params["charset"]
+			decodedContent, err := decodeContentWithCharset(part, part.Header.Get("Content-Transfer-Encoding"), charset)
+			if err != nil {
+				return textBody, htmlBody, attachments, embeddedFiles, err
+			}
+
+			ppContent, err := io.ReadAll(decodedContent)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
@@ -314,7 +383,7 @@ func isEmbeddedFile(part *multipart.Part) bool {
 
 func decodeEmbeddedFile(part *multipart.Part) (ef EmbeddedFile, err error) {
 	cid := decodeMimeSentence(part.Header.Get("Content-Id"))
-	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
+	decoded, err := decodeContentByTransferEncoding(part, part.Header.Get("Content-Transfer-Encoding"))
 	if err != nil {
 		return
 	}
@@ -332,7 +401,7 @@ func isAttachment(part *multipart.Part) bool {
 
 func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 	filename := decodeMimeSentence(part.FileName())
-	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
+	decoded, err := decodeContentByTransferEncoding(part, part.Header.Get("Content-Transfer-Encoding"))
 	if err != nil {
 		return
 	}
@@ -344,28 +413,46 @@ func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 	return
 }
 
-func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
-	switch encoding {
-	case "base64":
-		decoded := base64.NewDecoder(base64.StdEncoding, content)
-		b, err := ioutil.ReadAll(decoded)
-		if err != nil {
-			return nil, err
-		}
-
-		return bytes.NewReader(b), nil
-	case "7bit":
-		dd, err := ioutil.ReadAll(content)
-		if err != nil {
-			return nil, err
-		}
-
-		return bytes.NewReader(dd), nil
-	case "":
-		return content, nil
-	default:
-		return nil, fmt.Errorf("unknown encoding: %s", encoding)
+// decodeContentByCharset 根据指定的字符集解码内容为UTF-8
+func decodeContentByCharset(content io.Reader, charset string) (io.Reader, error) {
+	if charset == "" {
+		charset = "utf-8"
 	}
+
+	// 转换为小写以便比较
+	charset = strings.ToLower(charset)
+	var decoder *encoding.Decoder
+
+	switch charset {
+	case "utf-8":
+		// 已经是UTF-8，无需转换
+		return content, nil
+	case "gbk", "gb2312":
+		decoder = simplifiedchinese.GBK.NewDecoder()
+	case "gb18030":
+		decoder = simplifiedchinese.GB18030.NewDecoder()
+	// 可以添加更多字符集支持
+	default:
+		// 对于不支持的字符集，暂时按原样返回
+		return content, nil
+	}
+	return transform.NewReader(content, decoder), nil
+}
+
+// decodeContentWithCharset 根据指定的传输编码和字符集解码内容
+func decodeContentWithCharset(content io.Reader, encoding string, charset string) (io.Reader, error) {
+	// 首先处理传输编码
+	decodedContent, err := decodeContentByTransferEncoding(content, encoding)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果有字符集信息，则进行字符集转换
+	if charset != "" {
+		return decodeContentByCharset(decodedContent, charset)
+	}
+
+	return decodedContent, nil
 }
 
 type headerParser struct {
@@ -483,7 +570,7 @@ type Email struct {
 	ResentMessageID string
 
 	ContentType string
-	Content io.Reader
+	Content     io.Reader
 
 	HTMLBody string
 	TextBody string
